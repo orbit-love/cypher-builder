@@ -42,6 +42,56 @@ export class Exists extends CypherASTNode {
     public getCypher(env: CypherEnvironment): string {
         const subQueryStr = this.subQuery.getCypher(env);
         const paddedSubQuery = padBlock(subQueryStr);
-        return `EXISTS {\n${paddedSubQuery}\n}`;
+        try {
+            const transformedSubQuery = this.transformCypherQuery(paddedSubQuery);
+            return `EXISTS (\n${transformedSubQuery}\n)`;
+        } catch (e) {
+            return `EXISTS {\n${paddedSubQuery}\n)`;
+        }
+    }
+
+    /**
+     * @internal
+     */
+    private transformCypherQuery(cypherFragment: string): string {
+        type CypherCondition = { [key: string]: string };
+
+        // Remove the word "MATCH" and any preceding whitespace
+        const strippedMatch: string = cypherFragment.replace(/^\s*MATCH\s+/i, "");
+
+        // Extract the property conditions from the WHERE clause using regex
+        const whereRegEx: RegExp = /WHERE\s+\(?(.*?)\)?$/i;
+        const whereMatch: RegExpMatchArray | null = strippedMatch.match(whereRegEx);
+
+        if (!whereMatch || !whereMatch[1]) {
+            throw new Error("No WHERE clause found.");
+        }
+
+        const conditions: CypherCondition[] = whereMatch[1].split(/\s+AND\s+/i).map((condition: string) => {
+            const [key = "", value = ""] = condition.split(/\s*=\s*/); // default values to handle potential undefined
+            // Strip off any node prefix (like "this3.") from the key
+            const strippedKey: string = key.split(".").pop() as string; // assert that this will always be a string
+            return { [strippedKey]: value };
+        }) as CypherCondition[];
+
+        // Create the properties string for the node
+        const properties: string = conditions
+            .map((cond) => {
+                const keys = Object.keys(cond);
+                if (!keys.length) return "";
+                const key: string = keys[0] as string;
+                return `${key}: ${cond[key]}`;
+            })
+            .join(", ");
+
+        // Replace the WHERE clause with the properties string
+        let transformed: string = strippedMatch
+            .replace(whereRegEx, "")
+            .replace(/:(\w+|`[^`]+`)\s*(?=\))/, `$& { ${properties} }`);
+
+        // Remove the variable name inside node parentheses but keep the colon
+        transformed = transformed.replace(/\(\w+(:)/g, "($1");
+
+        return transformed;
     }
 }
